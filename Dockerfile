@@ -129,7 +129,9 @@ RUN mkdir -p /etc/zypp \
  && ! rpm --root /mnt/rootfs -q bash >/dev/null 2>&1 \
  && test ! -e /mnt/rootfs/usr/bin/sh -a ! -e /mnt/rootfs/usr/bin/bash \
  && test -s /mnt/rootfs/var/lib/ca-certificates/java-cacerts \
- && chroot /mnt/rootfs /opt/java/bin/java \
+ # The chroot has no /proc, so ld.so can't expand java's $ORIGIN/../lib RUNPATH
+ # to find libjli.so. Point it there explicitly; at runtime /proc is mounted.
+ && LD_LIBRARY_PATH=/opt/java/lib chroot /mnt/rootfs /opt/java/bin/java \
       -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics \
       --add-reads=java.xml=java.logging \
       --add-opens=java.rmi/sun.rmi.transport.tcp=ALL-UNNAMED \
