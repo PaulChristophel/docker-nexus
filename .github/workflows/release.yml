@@ -1,0 +1,124 @@
+name: Build and publish Nexus image
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/release.yml"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: docker.io/pcm0/nexus
+
+jobs:
+  build:
+    name: Nexus
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Read versions from Dockerfile
+        id: versions
+        shell: bash
+        run: |
+          arg() { sed -nE "s/^ARG $1=\"?([^\"]*)\"?$/\1/p" Dockerfile | head -n1; }
+          nexus="$(arg NEXUS_VERSION)"
+          java="$(arg JAVA_VERSION)"
+          base="$(arg BASE)"
+          [[ "$nexus" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]
+          [[ -n "$java" && -n "$base" ]]
+          echo "nexus=$nexus" >> "$GITHUB_OUTPUT"
+          echo "series=${nexus%.*}" >> "$GITHUB_OUTPUT"
+          echo "java=$java" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: pcm0
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Record build timestamp
+        id: build-time
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.versions.outputs.nexus }}
+            type=raw,value=${{ steps.versions.outputs.series }}
+            type=raw,value=latest
+            type=sha,prefix=${{ steps.versions.outputs.nexus }}-sha-
+          annotations: |
+            org.opencontainers.image.title=Sonatype Nexus Repository on openSUSE Tumbleweed
+            org.opencontainers.image.description=Sonatype Nexus Repository ${{ steps.versions.outputs.nexus }} running on a minimal openSUSE Tumbleweed JRE root filesystem.
+            org.opencontainers.image.authors=Paul Christophel <pmartin@gatech.edu>
+            org.opencontainers.image.vendor=Paul Christophel
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=https://hub.docker.com/r/pcm0/nexus
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}#readme
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.build-time.outputs.created }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ steps.versions.outputs.nexus }}
+            org.opencontainers.image.ref.name=${{ env.IMAGE_NAME }}:${{ steps.versions.outputs.nexus }}
+            org.opencontainers.image.component.nexus.version=${{ steps.versions.outputs.nexus }}
+            org.opencontainers.image.component.java.version=${{ steps.versions.outputs.java }}
+            org.opencontainers.image.base.name=${{ steps.versions.outputs.base }}
+            edu.gatech.image.owner=Paul Christophel <pmartin@gatech.edu>
+            edu.gatech.image.repository=${{ env.IMAGE_NAME }}
+            edu.gatech.image.os.distribution=opensuse-tumbleweed
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: slim
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          annotations: ${{ steps.metadata.outputs.annotations }}
+          build-args: |
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            IMAGE_URL=https://hub.docker.com/r/pcm0/nexus
+            IMAGE_DOCUMENTATION=${{ github.server_url }}/${{ github.repository }}#readme
+            IMAGE_REPOSITORY=${{ env.IMAGE_NAME }}
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_CREATED=${{ steps.build-time.outputs.created }}
+          cache-from: type=gha,scope=nexus
+          cache-to: type=gha,mode=max,scope=nexus
+
+      - name: Generate provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-name: index.docker.io/pcm0/nexus
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
